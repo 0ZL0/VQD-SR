@@ -49,9 +49,10 @@ class ImageDataset(Dataset):
         self.transform = transform
         self.image_paths = []
         allowed_extensions = {'.png', '.jpg', '.jpeg'}
-        for filename in os.listdir(image_folder_path):
-            if os.path.splitext(filename)[1].lower() in allowed_extensions:
-                self.image_paths.append(os.path.join(image_folder_path, filename))
+        for root, _, files in os.walk(image_folder_path):
+            for fn in files:
+                if os.path.splitext(fn)[1].lower() in allowed_extensions:
+                    self.image_paths.append(os.path.join(root, fn))
 
     def __len__(self):
         return len(self.image_paths)
@@ -67,11 +68,12 @@ class ImageDataset(Dataset):
 
 def main():
     parser = argparse.ArgumentParser(description="Train a custom VQGAN model.")
-    parser.add_argument('--config_stage1', type=str, required=True, help='Path to YAML config for Stage 1')
-    parser.add_argument('--config_stage2', type=str, required=True, help='Path to YAML config for Stage 2')
+    parser.add_argument('--config_stage1', type=str, default='taming-transformers/configs/top_scale_pretrain.yaml', help='Path to YAML config for Stage 1')
+    parser.add_argument('--config_stage2', type=str, default='taming-transformers/configs/load_top_mul_scale.yaml', help='Path to YAML config for Stage 2')
     parser.add_argument('--dataset_path', type=str, required=True, help='Path to the image dataset directory')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Initial learning rate')
     parser.add_argument('--batch_size', type=int, default=4, help='Training batch size')
+    parser.add_argument('--patch_size', type=int, default=256, help='Patch size for DataLoader')
     parser.add_argument('--epochs_stage1', type=int, default=50, help='Number of epochs for Stage 1')
     parser.add_argument('--epochs_stage2', type=int, default=100, help='Number of epochs for Stage 2')
     parser.add_argument('--logdir', type=str, default='logs_custom_vqgan', help='Directory for TensorBoard logs and checkpoints')
@@ -96,7 +98,7 @@ def main():
 
     # Define Transformations
     transformations = transforms.Compose([
-        transforms.Resize((256, 256)),
+        transforms.RandomCrop(args.patch_size),
         transforms.ToTensor(), # Converts to [0, 1] range
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]) # Normalizes to [-1, 1] range
     ])
@@ -207,20 +209,10 @@ def train_stage1(args, train_dataloader, writer):
             images = images.to(device)
 
             # Forward pass through VQModel
-            # VQModel's forward typically returns: x_recon, vq_loss, info_dict (optional)
-            # where info_dict might contain {'vq_loss': vq_loss, 'commit_loss': commit_loss, 'perplexity': perplexity}
-            # The taming.models.vqgan.VQModel indeed returns x_recon, vq_loss, info_dict (log_dict).
-            # However, if we only need xrec and qloss, and the third output is not strictly guaranteed or used,
-            # it's safer to unpack only what's needed if the model's forward is flexible or might change.
-            # For taming.models.vqgan.VQModel, it returns three values.
-            # If the intent is to match the original VQModel's behavior which returns 3 values,
-            # the original line `xrec, qloss, _ = vq_model(images)` is correct.
-            # If the model *only* returns two values (e.g. a simplified wrapper), then `xrec, qloss = vq_model(images)` would be correct.
-            # Given the context of using taming.models.vqgan.VQModel, it does return 3 values.
-            # The request is to change it to unpack only two. This implies the third value (log_dict from forward) will be ignored.
-            xrec, qloss = vq_model(images) # Changed as per request, this will cause an error if model returns 3 values.
-                                         # Assuming the VQModel used here is modified or a wrapper that returns only two values.
-                                         # Or, this is an intentional error to be fixed later based on actual model behavior.
+            # VQModel's forward typically returns: x_recon, vq_loss, info_dict
+            # where info_dict contains {'vq_loss': vq_loss, 'commit_loss': commit_loss, 'perplexity': perplexity}
+            # The exact return signature might vary; adapting based on common taming.models.vqgan.VQModel
+            xrec, qloss = vq_model(images) # Assuming this is the call signature for taming.models.vqgan.VQModel
 
             # Generator update (optimizer_idx=0)
             opt_ae.zero_grad()
@@ -376,9 +368,7 @@ def train_stage2(args, train_dataloader, writer):
 
             # Forward pass for multi-scale VQGAN
             # Expected to return x_recon, vq_loss, info_dict (similar to single-scale)
-            # Similar to the change in train_stage1, this assumes vq_model_ms will return only two values.
-            # The taming.models.vqgan_multi_scale_load_top_scale.VQModel also returns 3 values from its forward pass.
-            xrec_ms, qloss_ms = vq_model_ms(images) # Changed as per request
+            xrec_ms, qloss_ms = vq_model_ms(images)
 
             # Generator update
             opt_ae_ms.zero_grad()
